@@ -1,7 +1,8 @@
 import telebot
 import yfinance as yf
 
-TOKEN = "8773909397:AAEayU8SxG6iCl5s2-IHScFrJLH8jES88L8"
+import os
+TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=['start'])
