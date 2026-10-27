@@ -1,14 +1,18 @@
-import telebot
-import yfinance as yf
-
 import os
 from flask import Flask
 import threading
+import requests
 
 app = Flask(__name__)
+
+@app.route('/myip')
+def myip():
+    ip = requests.get('https://api.ipify.org').text
+    return f"Mi IP de Render es: {ip}"
+
 @app.route('/')
 def home():
-    return "Shinto Bot is alive!"
+    return "Shinito Bot is alive!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
