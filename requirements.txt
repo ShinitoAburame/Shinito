@@ -1,5 +1,4 @@
 Flask
 pyTelegramBotAPI
-python-binance
-yfinance
 requests
+yfinance
