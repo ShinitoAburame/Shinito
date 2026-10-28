@@ -1,3 +1,4 @@
+import math
 import os, threading, time
 from flask import Flask
 import telebot
@@ -50,31 +51,36 @@ def buscar_mejor_moneda():
         print(f"Error buscando moneda: {e}")
         return "BTCUSDT", 0
 
-def comprar_autonomo():
+def ejecutar_compra_autonoma(symbol):
     try:
-        symbol, cambio = buscar_mejor_moneda()
-        bal = client.get_asset_balance(asset='USDT')
-        usdt = float(bal['free'])
-        monto = usdt * MONTO_PCT
-        if monto < 11: 
-            bot.send_message(MY_CHAT_ID, f"⚠️ Saldo bajo {usdt:.2f} USDT")
+        # 1. Sacar balance
+        balance = client.get_account()
+        usdt_balance = float([b for b in balance['balances'] if b['asset']=='USDT'][0]['free'])
+        monto_usdt = usdt_balance * 0.20
+        if monto_usdt < 12: 
             return
 
-        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-        qty = round(monto / price, 6)
+        # 2. Sacar LOT_SIZE y PRICE_FILTER de Binance
+        info = client.get_symbol_info(symbol)
+        lot_filter = [f for f in info['filters'] if f['filterType']=='LOT_SIZE'][0]
+        step_size = float(lot_filter['stepSize'])
         
-        # Compra market
-        client.order_market_buy(symbol=symbol, quantity=qty)
-        positions[symbol] = {"price": price, "qty": qty, "usdt": monto}
+        # 3. Calcular cantidad y AJUSTARLA al stepSize
+        ticker = client.get_symbol_ticker(symbol=symbol)
+        precio = float(ticker['price'])
+        cantidad_bruta = monto_usdt / precio
         
-        stop_price = round(price * (1 - STOPLOSS_PCT), 4)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 4)
-
-        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ:\nMoneda: {symbol} (Top +{cambio:.2f}% 24h)\nMonto: 20% = {monto:.2f} USDT\nEntrada: {price}\nSL: -2% en {stop_price}\nTP: +5% en {tp_price}\nTe aviso si llega a +5% o más")
+        # Esta magia lo redondea al lote que quiere Binance
+        precision = int(round(-math.log(step_size, 10), 0))
+        cantidad = math.floor(cantidad_bruta * (10**precision)) / (10**precision)
+        
+        # 4. Comprar
+        client.order_market_buy(symbol=symbol, quantity=cantidad)
+        
+        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad}")
+        
     except Exception as e:
-        print(f"Error compra: {e}")
-        try: bot.send_message(MY_CHAT_ID, f"❌ Error AUTO: {e}")
-        except: pass
+        bot.send_message(MY_CHAT_ID, f"❌ Error AUTO: {e}")
 
 def check_ganancias():
     # Revisa posiciones cada 1 min
