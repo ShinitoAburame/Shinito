@@ -9,7 +9,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("BINANCE_TESTNET_API_KEY")
 API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET")
 PROXY = os.getenv("PROXY_URL") or "http://uoguvsaz:on13dk1xsk1q@45.38.107.97:6014"
-MY_CHAT_ID = None # si quieres que te avise a ti solo, pon tu ID aqui
+MY_CHAT_ID = 8132255561
 
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
