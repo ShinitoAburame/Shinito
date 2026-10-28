@@ -1,5 +1,5 @@
-pyTelegramBotAPI
-python-binance
-yfinance
-Flask
-pandas
+pyTelegramBotAPI==4.14.0
+python-binance==1.0.19
+Flask==2.3.3
+yfinance==0.2.31
+pandas==2.1.4
