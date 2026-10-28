@@ -20,15 +20,14 @@ client.API_URL = 'https://testnet.binance.vision/api'
 
 AUTO = False
 MONTO_PCT = 0.20
-STOPLOSS_PCT = 0.02  # 2%
-TAKE_PROFIT_PCT = 0.05 # 5%
+STOPLOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.05
 last_trade = 0
-positions = {} # guarda compras {symbol: {price, qty}}
+positions = {}
 
 def buscar_mejor_moneda():
     try:
         tickers = client.get_ticker()
-        # Filtro: solo USDT, volumen > 5M, no stablecoins
         blacklist = ['USDCUSDT','BUSDUSDT','DAIUSDT','TUSDUSDT','FDUSDUSDT']
         candidatos = []
         for t in tickers:
@@ -38,11 +37,9 @@ def buscar_mejor_moneda():
             try:
                 vol = float(t['quoteVolume'])
                 change = float(t['priceChangePercent'])
-                if vol > 5000000 and change > 0 and change < 15: # sube pero no pump raro de 50%
+                if vol > 5000000 and change > 0 and change < 15:
                     candidatos.append(t)
             except: continue
-        
-        # Ordena por % de ganancia 24h
         candidatos = sorted(candidatos, key=lambda x: float(x['priceChangePercent']), reverse=True)
         if candidatos:
             return candidatos[0]['symbol'], float(candidatos[0]['priceChangePercent'])
@@ -53,69 +50,64 @@ def buscar_mejor_moneda():
 
 def ejecutar_compra_autonoma(symbol):
     try:
-        # 1. Sacar balance
         balance = client.get_account()
         usdt_balance = float([b for b in balance['balances'] if b['asset']=='USDT'][0]['free'])
-        monto_usdt = usdt_balance * 0.20
+        monto_usdt = usdt_balance * MONTO_PCT
         if monto_usdt < 12: 
-            return
+            bot.send_message(MY_CHAT_ID, f"⚠️ Saldo muy bajo: {usdt_balance:.2f} USDT")
+            return False
 
-        # 2. Sacar LOT_SIZE y PRICE_FILTER de Binance
         info = client.get_symbol_info(symbol)
         lot_filter = [f for f in info['filters'] if f['filterType']=='LOT_SIZE'][0]
         step_size = float(lot_filter['stepSize'])
         
-        # 3. Calcular cantidad y AJUSTARLA al stepSize
         ticker = client.get_symbol_ticker(symbol=symbol)
         precio = float(ticker['price'])
         cantidad_bruta = monto_usdt / precio
         
-        # Esta magia lo redondea al lote que quiere Binance
-        precision = int(round(-math.log(step_size, 10), 0))
+        precision = int(round(-math.log(step_size, 10), 0)) if step_size < 1 else 0
+        if precision < 0: precision = 0
         cantidad = math.floor(cantidad_bruta * (10**precision)) / (10**precision)
+        if cantidad == 0:
+            cantidad = step_size
         
-        # 4. Comprar
         client.order_market_buy(symbol=symbol, quantity=cantidad)
+        positions[symbol] = {'price': precio, 'qty': cantidad}
         
-        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad}")
+        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}")
+        return True
         
     except Exception as e:
-        bot.send_message(MY_CHAT_ID, f"❌ Error AUTO: {e}")
+        bot.send_message(MY_CHAT_ID, f"❌ Error AUTO comprando {symbol}: {e}")
+        return False
 
 def check_ganancias():
-    # Revisa posiciones cada 1 min
     while True:
         try:
             for symbol in list(positions.keys()):
                 info = positions[symbol]
                 curr_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                 ganancia_pct = (curr_price - info['price']) / info['price']
-
-                # Si cae -2% vende solo con stoploss
                 if ganancia_pct <= -STOPLOSS_PCT:
                     try:
                         client.order_market_sell(symbol=symbol, quantity=info['qty'])
-                        bot.send_message(MY_CHAT_ID, f"🛑 STOPLOSS -2% ejecutado en {symbol}\nVendido en {curr_price}")
+                        bot.send_message(MY_CHAT_ID, f"🛑 STOPLOSS -2% en {symbol}\nVendido en {curr_price}")
                         del positions[symbol]
-                    except: pass
-                
-                # Si sube 5% o más, te pregunta
+                    except Exception as e:
+                        print(f"Error SL {symbol}: {e}")
                 elif ganancia_pct >= TAKE_PROFIT_PCT:
-                    bot.send_message(MY_CHAT_ID, f"💰 ¡GOLPE DE SUERTE! +{ganancia_pct*100:.2f}% en {symbol}\nEntrada: {info['price']} -> Ahora: {curr_price}\nGanancia rebasa 5%\n\n¿Quieres retirar? Responde:\n/retirar - Vendo todo y guardo ganancia\n/dejar - Dejo que siga corriendo")
+                    bot.send_message(MY_CHAT_ID, f"💰 ¡+{ganancia_pct*100:.2f}% en {symbol}!\nEntrada: {info['price']} -> Ahora: {curr_price}\n/retirar - Vendo\n/dejar - Dejo correr")
         except Exception as e:
             print(f"Check error: {e}")
         time.sleep(60)
 
 def comprar_autonomo():
     try:
-        # Aquí pon tu lógica real de compra, te dejo la plantilla con el fix de LOT_SIZE
-        from binance_logic import buscar_moneda_mas_rentable, comprar_con_lote_correcto
-        symbol = buscar_moneda_mas_rentable()
+        symbol, change = buscar_mejor_moneda()
         if symbol:
-            comprar_con_lote_correcto(symbol)
+            ejecutar_compra_autonoma(symbol)
     except Exception as e:
         print(f"Error en comprar_autonomo: {e}")
-        raise e
 
 def auto_loop():
     global last_trade
@@ -125,59 +117,75 @@ def auto_loop():
                 comprar_autonomo()
                 last_trade = time.time()
         except Exception as e:
-            print(f"Error en auto_loop pero sigo vivo: {e}")
-            try:
-                bot.send_message(MY_CHAT_ID, f"⚠️ AUTO falló pero sigo vivo: {e}")
-            except:
-                pass
+            print(f"Error en auto_loop: {e}")
         time.sleep(10)
 
 @app.route('/')
 def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live verde!\n/ auto_on - Activa modo autonomo 15min\n/ auto_off\n/ estado\n/ retirar - Vende si hay +5%\n/ dejar")
+def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
     global AUTO, last_trade
     AUTO=True
     last_trade = time.time()
-    bot.reply_to(m, "✅ AUTO AUTONOMO ACTIVADO\nBusca moneda más rentable cada 15min\n20% balance | SL 2% | TP 5%+\nTe aviso solo cuando haya +5%")
+    bot.reply_to(m, "✅ AUTO ACTIVADO\nBusca moneda cada 15min\n20% balance | SL 2% | TP 5%+")
 
 @bot.message_handler(commands=['auto_off'])
 def auto_off(m):
     global AUTO; AUTO=False
     bot.reply_to(m, "⏸️ AUTO apagado")
-
+    
+@bot.message_handler(commands=['forzar'])
+def forzar(m):
+    try:
+        bot.reply_to(m, "🔎 Forzando búsqueda...")
+        symbol, change = buscar_mejor_moneda()
+        if not symbol:
+            bot.reply_to(m, "No encontré moneda")
+            return
+        if symbol in positions:
+            bot.reply_to(m, f"Ya tienes {symbol}")
+            return
+        ok = ejecutar_compra_autonoma(symbol)
+        if ok:
+            bot.reply_to(m, f"✅ Compra forzada: {symbol} (+{change:.2f}%)")
+    except Exception as e:
+        bot.reply_to(m, f"Error en forzar: {e}")
+        
 @bot.message_handler(commands=['retirar'])
 def retirar(m):
     try:
+        if not positions:
+            bot.reply_to(m, "No hay posiciones abiertas")
+            return
         for symbol in list(positions.keys()):
             info = positions[symbol]
             client.order_market_sell(symbol=symbol, quantity=info['qty'])
             curr = float(client.get_symbol_ticker(symbol=symbol)['price'])
             gan = (curr - info['price'])/info['price']*100
-            bot.reply_to(m, f"✅ Retiro ejecutado {symbol} con +{gan:.2f}%")
+            bot.reply_to(m, f"✅ Vendido {symbol} con {gan:.2f}%")
             del positions[symbol]
-        if not positions:
-            bot.reply_to(m, "No hay posiciones abiertas")
     except Exception as e:
         bot.reply_to(m, f"Error retirar: {e}")
 
 @bot.message_handler(commands=['dejar'])
 def dejar(m):
-    bot.reply_to(m, "👌 Dejando correr la ganancia, te vuelvo a avisar si sube más")
+    bot.reply_to(m, "👌 Dejando correr la ganancia")
 
 @bot.message_handler(commands=['estado'])
 def estado(m):
     b = client.get_asset_balance(asset='USDT')
-    msg = f"USDT: {float(b['free']):.2f} | AUTO: {AUTO} | SL 2% | TP 5%+\n"
+    msg = f"USDT: {float(b['free']):.2f} | AUTO: {AUTO}\n"
     if positions:
         for s,i in positions.items():
             curr = float(client.get_symbol_ticker(symbol=s)['price'])
             pct = (curr-i['price'])/i['price']*100
-            msg += f"{s}: {pct:.2f}%\n"
+            msg += f"{s}: {pct:.2f}% ({i['qty']})\n"
+    else:
+        msg += "Sin posiciones"
     bot.reply_to(m, msg)
 
 if __name__ == "__main__":
