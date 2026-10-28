@@ -3,9 +3,9 @@ from flask import Flask
 import telebot
 from binance.client import Client
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-API = os.getenv("BINANCE_API_KEY")
-SECRET = os.getenv("BINANCE_API_SECRET")
+TOKEN = os.getenv("BOT_TOKEN")
+API = os.getenv("BINANCE_TESTNET_API_KEY")
+SECRET = os.getenv("BINANCE_TESTNET_API_SECRET")
 
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
