@@ -183,5 +183,9 @@ def estado(m):
 if __name__ == "__main__":
     threading.Thread(target=auto_loop, daemon=True).start()
     threading.Thread(target=check_ganancias, daemon=True).start()
-    threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+    threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
