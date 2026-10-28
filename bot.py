@@ -106,12 +106,30 @@ def check_ganancias():
             print(f"Check error: {e}")
         time.sleep(60)
 
+def comprar_autonomo():
+    try:
+        # Aquí pon tu lógica real de compra, te dejo la plantilla con el fix de LOT_SIZE
+        from binance_logic import buscar_moneda_mas_rentable, comprar_con_lote_correcto
+        symbol = buscar_moneda_mas_rentable()
+        if symbol:
+            comprar_con_lote_correcto(symbol)
+    except Exception as e:
+        print(f"Error en comprar_autonomo: {e}")
+        raise e
+
 def auto_loop():
     global last_trade
     while True:
-        if AUTO and (time.time() - last_trade) >= 900:
-            comprar_autonomo()
-            last_trade = time.time()
+        try:
+            if AUTO and (time.time() - last_trade) >= 900:
+                comprar_autonomo()
+                last_trade = time.time()
+        except Exception as e:
+            print(f"Error en auto_loop pero sigo vivo: {e}")
+            try:
+                bot.send_message(MY_CHAT_ID, f"⚠️ AUTO falló pero sigo vivo: {e}")
+            except:
+                pass
         time.sleep(10)
 
 @app.route('/')
