@@ -24,6 +24,7 @@ AUTO = False
 MONTO_PCT = 0.20
 STOPLOSS_PCT = 0.02
 TAKE_PROFIT_PCT = 0.05
+MONTO_MINIMO = 5.5  # Minimo que deja Binance real
 last_trade = 0
 positions = {}
 historial_trades = []
@@ -58,14 +59,13 @@ def cargar_todo():
         positions = {}
         historial_trades = []
 
-# --- NUEVO V3.2: Configura menu desde Github ---
 def configurar_menu():
     try:
         print("Configurando menu desde Github...")
         bot.delete_my_commands()
         time.sleep(1)
         comandos = [
-            BotCommand("start", "🔥 Menu principal"),
+            BotCommand("start", "Menu principal"),
             BotCommand("auto_on", "Activa modo automatico 15min"),
             BotCommand("auto_off", "Pausa modo automatico"),
             BotCommand("estado", "Ver saldo y posiciones"),
@@ -77,16 +77,10 @@ def configurar_menu():
             BotCommand("recuperar", "Sincroniza con Binance"),
         ]
         bot.set_my_commands(comandos)
-        # Intenta borrar el boton de Menu web feo si existe
-        try:
-            bot.delete_my_commands(scope=None)
-            bot.set_my_commands(comandos)
-        except: pass
         print("✅ Menu configurado correctamente")
     except Exception as e:
         print(f"Error configurando menu: {e}")
 
-# --- FIX V3.1: Sincroniza posiciones fantasma con Binance real ---
 def limpiar_fantasmas():
     global positions
     try:
@@ -147,19 +141,39 @@ def ajustar_cantidad(symbol, cantidad_bruta):
     except:
         return cantidad_bruta
 
+# --- LOGICA NUEVA V3.3: 20% si alcanza, si no minimo ---
 def ejecutar_compra_autonoma(symbol):
     try:
         balance = client.get_account()
         usdt_balance = float([b for b in balance['balances'] if b['asset']=='USDT'][0]['free'])
-        monto_usdt = usdt_balance * MONTO_PCT
-        if monto_usdt < 12: 
-            bot.send_message(MY_CHAT_ID, f"⚠️ Saldo muy bajo: {usdt_balance:.2f} USDT")
+        
+        # 1. Si no tiene ni para el minimo, no hace nada y NO spamea
+        if usdt_balance < MONTO_MINIMO:
+            print(f"Saldo insuficiente total: {usdt_balance} < {MONTO_MINIMO}, pausando")
             return False
+
+        # 2. Calcula 20%
+        monto_20pct = usdt_balance * MONTO_PCT
+        monto_usdt = 0
+        modo = ""
+
+        if monto_20pct >= 11: # Si el 20% ya es suficiente
+            monto_usdt = monto_20pct
+            modo = f"20% ({MONTO_PCT*100:.0f}%)"
+        else: # Si el 20% no alcanza, usa el minimo posible
+            # Usa 90% del balance si esta muy bajo, para dejar algo para fees
+            if usdt_balance < 12:
+                monto_usdt = usdt_balance * 0.9
+            else:
+                monto_usdt = max(MONTO_MINIMO, monto_20pct)
+            modo = "MINIMO (saldo bajo)"
+
         ticker = client.get_symbol_ticker(symbol=symbol)
         precio = float(ticker['price'])
         cantidad_bruta = monto_usdt / precio
         cantidad = ajustar_cantidad(symbol, cantidad_bruta)
         client.order_market_buy(symbol=symbol, quantity=cantidad)
+
         if symbol in positions:
             old = positions[symbol]
             total_qty = old['qty'] + cantidad
@@ -167,8 +181,9 @@ def ejecutar_compra_autonoma(symbol):
             positions[symbol] = {'price': avg_price, 'qty': total_qty}
         else:
             positions[symbol] = {'price': precio, 'qty': cantidad}
+        
         guardar_todo()
-        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}")
+        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}\n💵 Monto: {monto_usdt:.2f} USDT - Modo: {modo}\nSaldo restante: {usdt_balance - monto_usdt:.2f} USDT")
         return True
     except Exception as e:
         bot.send_message(MY_CHAT_ID, f"❌ Error AUTO comprando {symbol}: {e}")
@@ -229,10 +244,10 @@ def auto_loop():
         time.sleep(10)
 
 @app.route('/')
-def home(): return "Shinito V3.2 - Menu desde Github - 20% SL 2% TP 5%+"
+def home(): return "Shinito V3.3 - 20% o Minimo - AntiSpam"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito V3.2 FIX!\n/auto_on - Activa 15min\n/auto_off - Pausa auto\n/estado - Ver saldo\n/forzar - Fuerza 1 compra\n/retirar - Vende todo\n/dejar - Deja correr\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
+def start(m): bot.reply_to(m, "🔥 Shinito V3.3 FIX!\n/auto_on - Activa 15min\n/auto_off - Pausa auto\n/estado - Ver saldo\n/forzar - Fuerza 1 compra\n/retirar - Vende todo\n/dejar - Deja correr\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
@@ -240,7 +255,7 @@ def auto_on(m):
     AUTO=True
     last_trade = time.time()
     guardar_todo()
-    bot.reply_to(m, "✅ AUTO ACTIVADO\nBusca moneda cada 15min\n20% balance | SL 2% | TP 5%+")
+    bot.reply_to(m, "✅ AUTO ACTIVADO\nBusca moneda cada 15min\nSi hay saldo: 20% | Si no: Minimo 5.5 USDT")
 
 @bot.message_handler(commands=['auto_off'])
 def auto_off(m):
@@ -371,7 +386,7 @@ def run_bot():
 
 if __name__ == "__main__":
     cargar_todo()
-    configurar_menu() # <-- NUEVO: configura menu desde Github
+    configurar_menu()
     threading.Thread(target=auto_loop, daemon=True).start()
     threading.Thread(target=check_ganancias, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
