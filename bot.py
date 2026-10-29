@@ -3,6 +3,7 @@ import os, threading, time, json
 from datetime import datetime
 from flask import Flask
 import telebot
+from telebot.types import BotCommand
 import binance.client
 binance.client.Client.ping = lambda self: {}
 from binance.client import Client
@@ -57,18 +58,44 @@ def cargar_todo():
         positions = {}
         historial_trades = []
 
+# --- NUEVO V3.2: Configura menu desde Github ---
+def configurar_menu():
+    try:
+        print("Configurando menu desde Github...")
+        bot.delete_my_commands()
+        time.sleep(1)
+        comandos = [
+            BotCommand("start", "🔥 Menu principal"),
+            BotCommand("auto_on", "Activa modo automatico 15min"),
+            BotCommand("auto_off", "Pausa modo automatico"),
+            BotCommand("estado", "Ver saldo y posiciones"),
+            BotCommand("forzar", "Fuerza 1 compra ahora"),
+            BotCommand("retirar", "Vende todo manual"),
+            BotCommand("dejar", "Deja correr ganancia"),
+            BotCommand("historial", "Ver ultimas operaciones"),
+            BotCommand("ganancias", "Resumen de profit"),
+            BotCommand("recuperar", "Sincroniza con Binance"),
+        ]
+        bot.set_my_commands(comandos)
+        # Intenta borrar el boton de Menu web feo si existe
+        try:
+            bot.delete_my_commands(scope=None)
+            bot.set_my_commands(comandos)
+        except: pass
+        print("✅ Menu configurado correctamente")
+    except Exception as e:
+        print(f"Error configurando menu: {e}")
+
 # --- FIX V3.1: Sincroniza posiciones fantasma con Binance real ---
 def limpiar_fantasmas():
     global positions
     try:
         account = client.get_account()
         balances_reales = {b['asset']: float(b['free']) for b in account['balances'] if float(b['free']) > 0.00001}
-        # Si tengo BNBUSDT en positions pero en Binance no tengo BNB, es fantasma
         fantasmas = []
         for sym in list(positions.keys()):
             asset = sym.replace('USDT','')
             if asset not in balances_reales and sym[:-4] not in balances_reales:
-                # Caso especial: BNB a veces se usa para fee y queda 0
                 if balances_reales.get(asset, 0) == 0:
                     fantasmas.append(sym)
         for f in fantasmas:
@@ -83,7 +110,7 @@ def limpiar_fantasmas():
 
 def buscar_mejor_moneda():
     try:
-        limpiar_fantasmas() # Limpia antes de buscar
+        limpiar_fantasmas()
         tickers = client.get_ticker()
         blacklist = ['USDCUSDT','BUSDUSDT','DAIUSDT','TUSDUSDT','FDUSDUSDT','USDEUSDT']
         candidatos = []
@@ -182,7 +209,6 @@ def comprar_autonomo():
         if symbol:
             ejecutar_compra_autonoma(symbol)
         else:
-            # FIX: Si no hay candidatas pero tampoco hay posiciones, no spamees
             if len(positions) == 0:
                 print("No hay candidatas ahora, intento en proximo ciclo")
             else:
@@ -203,10 +229,10 @@ def auto_loop():
         time.sleep(10)
 
 @app.route('/')
-def home(): return "Shinito V3.1 Fixed - 20% SL 2% TP 5%+ CON FIX FANTASMA"
+def home(): return "Shinito V3.2 - Menu desde Github - 20% SL 2% TP 5%+"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito V3.1 FIX!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
+def start(m): bot.reply_to(m, "🔥 Shinito V3.2 FIX!\n/auto_on - Activa 15min\n/auto_off - Pausa auto\n/estado - Ver saldo\n/forzar - Fuerza 1 compra\n/retirar - Vende todo\n/dejar - Deja correr\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
@@ -345,6 +371,7 @@ def run_bot():
 
 if __name__ == "__main__":
     cargar_todo()
+    configurar_menu() # <-- NUEVO: configura menu desde Github
     threading.Thread(target=auto_loop, daemon=True).start()
     threading.Thread(target=check_ganancias, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
