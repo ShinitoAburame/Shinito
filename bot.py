@@ -54,11 +54,38 @@ def cargar_todo():
         print(f"Cargado: {len(positions)} posiciones, {len(historial_trades)} trades en historial")
     except Exception as e:
         print(f"Error cargando: {e}")
+        positions = {}
+        historial_trades = []
+
+# --- FIX V3.1: Sincroniza posiciones fantasma con Binance real ---
+def limpiar_fantasmas():
+    global positions
+    try:
+        account = client.get_account()
+        balances_reales = {b['asset']: float(b['free']) for b in account['balances'] if float(b['free']) > 0.00001}
+        # Si tengo BNBUSDT en positions pero en Binance no tengo BNB, es fantasma
+        fantasmas = []
+        for sym in list(positions.keys()):
+            asset = sym.replace('USDT','')
+            if asset not in balances_reales and sym[:-4] not in balances_reales:
+                # Caso especial: BNB a veces se usa para fee y queda 0
+                if balances_reales.get(asset, 0) == 0:
+                    fantasmas.append(sym)
+        for f in fantasmas:
+            print(f"Limpiando fantasma: {f}")
+            del positions[f]
+        if fantasmas:
+            guardar_todo()
+            return True
+    except Exception as e:
+        print(f"Error limpiando fantasmas: {e}")
+    return False
 
 def buscar_mejor_moneda():
     try:
+        limpiar_fantasmas() # Limpia antes de buscar
         tickers = client.get_ticker()
-        blacklist = ['USDCUSDT','BUSDUSDT','DAIUSDT','TUSDUSDT','FDUSDUSDT']
+        blacklist = ['USDCUSDT','BUSDUSDT','DAIUSDT','TUSDUSDT','FDUSDUSDT','USDEUSDT']
         candidatos = []
         for t in tickers:
             sym = t['symbol']
@@ -155,7 +182,11 @@ def comprar_autonomo():
         if symbol:
             ejecutar_compra_autonoma(symbol)
         else:
-            bot.send_message(MY_CHAT_ID, "ℹ️ No hay monedas nuevas para comprar, todas ya están en posiciones")
+            # FIX: Si no hay candidatas pero tampoco hay posiciones, no spamees
+            if len(positions) == 0:
+                print("No hay candidatas ahora, intento en proximo ciclo")
+            else:
+                bot.send_message(MY_CHAT_ID, "ℹ️ No hay monedas nuevas para comprar, todas ya están en posiciones")
     except Exception as e:
         print(f"Error en comprar_autonomo: {e}")
 
@@ -172,10 +203,10 @@ def auto_loop():
         time.sleep(10)
 
 @app.route('/')
-def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+ CON HISTORIAL V3"
+def home(): return "Shinito V3.1 Fixed - 20% SL 2% TP 5%+ CON FIX FANTASMA"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
+def start(m): bot.reply_to(m, "🔥 Shinito V3.1 FIX!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
@@ -197,7 +228,7 @@ def forzar(m):
         bot.reply_to(m, "🔎 Forzando búsqueda...")
         symbol, change = buscar_mejor_moneda()
         if not symbol:
-            bot.reply_to(m, "Ya tienes todas las mejores monedas o no hay candidatas")
+            bot.reply_to(m, "Ya tienes todas las mejores monedas o no hay candidatas con volumen, espera 15 min")
             return
         ok = ejecutar_compra_autonoma(symbol)
         if ok:
