@@ -1,5 +1,6 @@
 import math
-import os, threading, time
+import os, threading, time, json
+from datetime import datetime
 from flask import Flask
 import telebot
 import binance.client
@@ -24,6 +25,35 @@ STOPLOSS_PCT = 0.02
 TAKE_PROFIT_PCT = 0.05
 last_trade = 0
 positions = {}
+historial_trades = []
+
+ESTADO_FILE = "estado.json"
+HISTORIAL_FILE = "historial.json"
+
+def guardar_todo():
+    try:
+        with open(ESTADO_FILE, "w") as f:
+            json.dump({"positions": positions, "AUTO": AUTO, "last_trade": last_trade}, f)
+        with open(HISTORIAL_FILE, "w") as f:
+            json.dump(historial_trades, f)
+    except Exception as e:
+        print(f"Error guardando: {e}")
+
+def cargar_todo():
+    global positions, AUTO, last_trade, historial_trades
+    try:
+        if os.path.exists(ESTADO_FILE):
+            with open(ESTADO_FILE, "r") as f:
+                data = json.load(f)
+                positions = data.get("positions", {})
+                AUTO = data.get("AUTO", False)
+                last_trade = data.get("last_trade", 0)
+        if os.path.exists(HISTORIAL_FILE):
+            with open(HISTORIAL_FILE, "r") as f:
+                historial_trades = json.load(f)
+        print(f"Cargado: {len(positions)} posiciones, {len(historial_trades)} trades en historial")
+    except Exception as e:
+        print(f"Error cargando: {e}")
 
 def buscar_mejor_moneda():
     try:
@@ -71,14 +101,11 @@ def ejecutar_compra_autonoma(symbol):
         if monto_usdt < 12: 
             bot.send_message(MY_CHAT_ID, f"⚠️ Saldo muy bajo: {usdt_balance:.2f} USDT")
             return False
-
         ticker = client.get_symbol_ticker(symbol=symbol)
         precio = float(ticker['price'])
         cantidad_bruta = monto_usdt / precio
         cantidad = ajustar_cantidad(symbol, cantidad_bruta)
-        
         client.order_market_buy(symbol=symbol, quantity=cantidad)
-
         if symbol in positions:
             old = positions[symbol]
             total_qty = old['qty'] + cantidad
@@ -86,10 +113,9 @@ def ejecutar_compra_autonoma(symbol):
             positions[symbol] = {'price': avg_price, 'qty': total_qty}
         else:
             positions[symbol] = {'price': precio, 'qty': cantidad}
-        
+        guardar_todo()
         bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}")
         return True
-        
     except Exception as e:
         bot.send_message(MY_CHAT_ID, f"❌ Error AUTO comprando {symbol}: {e}")
         return False
@@ -106,7 +132,15 @@ def check_ganancias():
                         qty_ajustada = ajustar_cantidad(symbol, info['qty'])
                         client.order_market_sell(symbol=symbol, quantity=qty_ajustada)
                         bot.send_message(MY_CHAT_ID, f"🛑 STOPLOSS -2% en {symbol}\nVendido en {curr_price}")
+                        historial_trades.append({
+                            "par": symbol,
+                            "tipo": "SL",
+                            "ganancia_pct": round(ganancia_pct*100,2),
+                            "ganancia_usdt": round((curr_price - info['price'])*info['qty'],4),
+                            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
+                        })
                         del positions[symbol]
+                        guardar_todo()
                     except Exception as e:
                         print(f"Error SL {symbol}: {e}")
                 elif ganancia_pct >= TAKE_PROFIT_PCT:
@@ -132,26 +166,29 @@ def auto_loop():
             if AUTO and (time.time() - last_trade) >= 900:
                 comprar_autonomo()
                 last_trade = time.time()
+                guardar_todo()
         except Exception as e:
             print(f"Error en auto_loop: {e}")
         time.sleep(10)
 
 @app.route('/')
-def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+ FIXED V2"
+def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+ CON HISTORIAL V3"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar")
+def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
     global AUTO, last_trade
     AUTO=True
     last_trade = time.time()
+    guardar_todo()
     bot.reply_to(m, "✅ AUTO ACTIVADO\nBusca moneda cada 15min\n20% balance | SL 2% | TP 5%+")
 
 @bot.message_handler(commands=['auto_off'])
 def auto_off(m):
     global AUTO; AUTO=False
+    guardar_todo()
     bot.reply_to(m, "⏸️ AUTO apagado")
     
 @bot.message_handler(commands=['forzar'])
@@ -180,8 +217,17 @@ def retirar(m):
             client.order_market_sell(symbol=symbol, quantity=qty_ajustada)
             curr = float(client.get_symbol_ticker(symbol=symbol)['price'])
             gan = (curr - info['price'])/info['price']*100
-            bot.reply_to(m, f"✅ Vendido {symbol} con {gan:.2f}%")
+            gan_usdt = (curr - info['price'])*info['qty']
+            historial_trades.append({
+                "par": symbol,
+                "tipo": "MANUAL",
+                "ganancia_pct": round(gan,2),
+                "ganancia_usdt": round(gan_usdt,4),
+                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
+            })
+            bot.reply_to(m, f"✅ Vendido {symbol} con {gan:.2f}% (+{gan_usdt:.4f} USDT)")
             del positions[symbol]
+        guardar_todo()
     except Exception as e:
         bot.reply_to(m, f"Error retirar: {e}")
 
@@ -205,6 +251,56 @@ def estado(m):
     except Exception as e:
         bot.reply_to(m, f"Error estado: {e}")
 
+@bot.message_handler(commands=['historial'])
+def historial(m):
+    try:
+        if not historial_trades:
+            bot.reply_to(m, "📊 Sin trades aún. Usa /forzar para el primero.")
+            return
+        total_usdt = sum([t.get('ganancia_usdt',0) for t in historial_trades])
+        msg = f"📊 HISTORIAL ({len(historial_trades)} trades)\nGanancia total: {total_usdt:.4f} USDT\n\n"
+        for t in historial_trades[-10:]:
+            msg += f"{t['fecha']} | {t['par']} {t['tipo']} {t['ganancia_pct']}% (+{t['ganancia_usdt']} USDT)\n"
+        bot.reply_to(m, msg)
+    except Exception as e:
+        bot.reply_to(m, f"Error historial: {e}")
+
+@bot.message_handler(commands=['ganancias'])
+def ganancias(m):
+    try:
+        if not historial_trades:
+            bot.reply_to(m, "Sin ganancias aún")
+            return
+        total = sum([t.get('ganancia_usdt',0) for t in historial_trades])
+        b = client.get_asset_balance(asset='USDT')
+        actual = float(b['free'])
+        msg = f"💰 GANANCIAS\nHoy: {total:.4f} USDT\nBalance actual: {actual:.2f} USDT\nTrades: {len(historial_trades)}"
+        bot.reply_to(m, msg)
+    except Exception as e:
+        bot.reply_to(m, f"Error ganancias: {e}")
+
+@bot.message_handler(commands=['recuperar'])
+def recuperar(m):
+    try:
+        account = client.get_account()
+        balances = [b for b in account['balances'] if float(b['free']) > 0 and b['asset'] != 'USDT']
+        msg = "🔄 Sincronizando con Binance...\n"
+        for bal in balances:
+            asset = bal['asset']
+            symbol = asset + "USDT"
+            try:
+                free = float(bal['free'])
+                if free == 0: continue
+                if symbol not in positions:
+                    curr = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    positions[symbol] = {'price': curr, 'qty': free}
+                    msg += f"Recuperado: {symbol} x{free}\n"
+            except: continue
+        guardar_todo()
+        bot.reply_to(m, msg + "\n✅ Recuperación completa. Usa /estado")
+    except Exception as e:
+        bot.reply_to(m, f"Error recuperar: {e}")
+
 def run_bot():
     while True:
         try:
@@ -217,6 +313,7 @@ def run_bot():
             time.sleep(10)
 
 if __name__ == "__main__":
+    cargar_todo()
     threading.Thread(target=auto_loop, daemon=True).start()
     threading.Thread(target=check_ganancias, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
