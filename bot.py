@@ -13,7 +13,7 @@ PROXY = os.getenv("PROXY_URL") or "http://uoguvsaz:on13dk1xsk1q@45.38.107.97:601
 MY_CHAT_ID = 8132255561
 
 app = Flask(__name__)
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 proxies = {"http": PROXY, "https": PROXY}
 client = Client(API_KEY, API_SECRET, testnet=True, requests_params={"proxies": proxies, "timeout": 30})
 client.API_URL = 'https://testnet.binance.vision/api'
@@ -34,7 +34,7 @@ def buscar_mejor_moneda():
             sym = t['symbol']
             if not sym.endswith('USDT'): continue
             if sym in blacklist: continue
-            if sym in positions: continue  # <-- FIX 1: No comprar repetidas
+            if sym in positions: continue
             try:
                 vol = float(t['quoteVolume'])
                 change = float(t['priceChangePercent'])
@@ -49,6 +49,20 @@ def buscar_mejor_moneda():
         print(f"Error buscando moneda: {e}")
         return None, 0
 
+def ajustar_cantidad(symbol, cantidad_bruta):
+    try:
+        info = client.get_symbol_info(symbol)
+        lot_filter = [f for f in info['filters'] if f['filterType']=='LOT_SIZE'][0]
+        step_size = float(lot_filter['stepSize'])
+        precision = int(round(-math.log(step_size, 10), 0)) if step_size < 1 else 0
+        if precision < 0: precision = 0
+        cantidad = math.floor(cantidad_bruta * (10**precision)) / (10**precision)
+        if cantidad == 0:
+            cantidad = step_size
+        return cantidad
+    except:
+        return cantidad_bruta
+
 def ejecutar_compra_autonoma(symbol):
     try:
         balance = client.get_account()
@@ -58,23 +72,13 @@ def ejecutar_compra_autonoma(symbol):
             bot.send_message(MY_CHAT_ID, f"⚠️ Saldo muy bajo: {usdt_balance:.2f} USDT")
             return False
 
-        info = client.get_symbol_info(symbol)
-        lot_filter = [f for f in info['filters'] if f['filterType']=='LOT_SIZE'][0]
-        step_size = float(lot_filter['stepSize'])
-        
         ticker = client.get_symbol_ticker(symbol=symbol)
         precio = float(ticker['price'])
         cantidad_bruta = monto_usdt / precio
-        
-        precision = int(round(-math.log(step_size, 10), 0)) if step_size < 1 else 0
-        if precision < 0: precision = 0
-        cantidad = math.floor(cantidad_bruta * (10**precision)) / (10**precision)
-        if cantidad == 0:
-            cantidad = step_size
+        cantidad = ajustar_cantidad(symbol, cantidad_bruta)
         
         client.order_market_buy(symbol=symbol, quantity=cantidad)
 
-        # FIX 2: Acumular en lugar de sobreescribir
         if symbol in positions:
             old = positions[symbol]
             total_qty = old['qty'] + cantidad
@@ -99,7 +103,8 @@ def check_ganancias():
                 ganancia_pct = (curr_price - info['price']) / info['price']
                 if ganancia_pct <= -STOPLOSS_PCT:
                     try:
-                        client.order_market_sell(symbol=symbol, quantity=info['qty'])
+                        qty_ajustada = ajustar_cantidad(symbol, info['qty'])
+                        client.order_market_sell(symbol=symbol, quantity=qty_ajustada)
                         bot.send_message(MY_CHAT_ID, f"🛑 STOPLOSS -2% en {symbol}\nVendido en {curr_price}")
                         del positions[symbol]
                     except Exception as e:
@@ -132,7 +137,7 @@ def auto_loop():
         time.sleep(10)
 
 @app.route('/')
-def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+ FIXED"
+def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+ FIXED V2"
 
 @bot.message_handler(commands=['start'])
 def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar")
@@ -171,7 +176,8 @@ def retirar(m):
             return
         for symbol in list(positions.keys()):
             info = positions[symbol]
-            client.order_market_sell(symbol=symbol, quantity=info['qty'])
+            qty_ajustada = ajustar_cantidad(symbol, info['qty'])
+            client.order_market_sell(symbol=symbol, quantity=qty_ajustada)
             curr = float(client.get_symbol_ticker(symbol=symbol)['price'])
             gan = (curr - info['price'])/info['price']*100
             bot.reply_to(m, f"✅ Vendido {symbol} con {gan:.2f}%")
@@ -185,23 +191,33 @@ def dejar(m):
 
 @bot.message_handler(commands=['estado'])
 def estado(m):
-    b = client.get_asset_balance(asset='USDT')
-    msg = f"USDT: {float(b['free']):.2f} | AUTO: {AUTO}\n"
-    if positions:
-        for s,i in positions.items():
-            curr = float(client.get_symbol_ticker(symbol=s)['price'])
-            pct = (curr-i['price'])/i['price']*100
-            msg += f"{s}: {pct:.2f}% ({i['qty']})\n"
-    else:
-        msg += "Sin posiciones"
-    bot.reply_to(m, msg)
+    try:
+        b = client.get_asset_balance(asset='USDT')
+        msg = f"USDT: {float(b['free']):.2f} | AUTO: {AUTO}\n"
+        if positions:
+            for s,i in positions.items():
+                curr = float(client.get_symbol_ticker(symbol=s)['price'])
+                pct = (curr-i['price'])/i['price']*100
+                msg += f"{s}: {pct:.2f}% ({i['qty']})\n"
+        else:
+            msg += "Sin posiciones"
+        bot.reply_to(m, msg)
+    except Exception as e:
+        bot.reply_to(m, f"Error estado: {e}")
+
+def run_bot():
+    while True:
+        try:
+            print("Iniciando bot polling...")
+            bot.remove_webhook()
+            time.sleep(3)
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
+        except Exception as e:
+            print(f"Polling crash: {e} - reintentando en 10s")
+            time.sleep(10)
 
 if __name__ == "__main__":
     threading.Thread(target=auto_loop, daemon=True).start()
     threading.Thread(target=check_ganancias, daemon=True).start()
-    try:
-        bot.remove_webhook()
-    except:
-        pass
-    threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
+    threading.Thread(target=run_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
