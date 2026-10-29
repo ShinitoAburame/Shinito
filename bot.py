@@ -34,6 +34,7 @@ def buscar_mejor_moneda():
             sym = t['symbol']
             if not sym.endswith('USDT'): continue
             if sym in blacklist: continue
+            if sym in positions: continue  # <-- FIX 1: No comprar repetidas
             try:
                 vol = float(t['quoteVolume'])
                 change = float(t['priceChangePercent'])
@@ -43,10 +44,10 @@ def buscar_mejor_moneda():
         candidatos = sorted(candidatos, key=lambda x: float(x['priceChangePercent']), reverse=True)
         if candidatos:
             return candidatos[0]['symbol'], float(candidatos[0]['priceChangePercent'])
-        return "BTCUSDT", 0
+        return None, 0
     except Exception as e:
         print(f"Error buscando moneda: {e}")
-        return "BTCUSDT", 0
+        return None, 0
 
 def ejecutar_compra_autonoma(symbol):
     try:
@@ -72,7 +73,15 @@ def ejecutar_compra_autonoma(symbol):
             cantidad = step_size
         
         client.order_market_buy(symbol=symbol, quantity=cantidad)
-        positions[symbol] = {'price': precio, 'qty': cantidad}
+
+        # FIX 2: Acumular en lugar de sobreescribir
+        if symbol in positions:
+            old = positions[symbol]
+            total_qty = old['qty'] + cantidad
+            avg_price = (old['price']*old['qty'] + precio*cantidad) / total_qty
+            positions[symbol] = {'price': avg_price, 'qty': total_qty}
+        else:
+            positions[symbol] = {'price': precio, 'qty': cantidad}
         
         bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}")
         return True
@@ -106,6 +115,8 @@ def comprar_autonomo():
         symbol, change = buscar_mejor_moneda()
         if symbol:
             ejecutar_compra_autonoma(symbol)
+        else:
+            bot.send_message(MY_CHAT_ID, "ℹ️ No hay monedas nuevas para comprar, todas ya están en posiciones")
     except Exception as e:
         print(f"Error en comprar_autonomo: {e}")
 
@@ -121,7 +132,7 @@ def auto_loop():
         time.sleep(10)
 
 @app.route('/')
-def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+"
+def home(): return "Shinito Autonomo Live - 20% SL 2% TP 5%+ FIXED"
 
 @bot.message_handler(commands=['start'])
 def start(m): bot.reply_to(m, "🔥 Shinito Autonomo Live!\n/auto_on - Activa 15min\n/auto_off\n/estado\n/forzar - Fuerza 1 compra\n/retirar\n/dejar")
@@ -144,10 +155,7 @@ def forzar(m):
         bot.reply_to(m, "🔎 Forzando búsqueda...")
         symbol, change = buscar_mejor_moneda()
         if not symbol:
-            bot.reply_to(m, "No encontré moneda")
-            return
-        if symbol in positions:
-            bot.reply_to(m, f"Ya tienes {symbol}")
+            bot.reply_to(m, "Ya tienes todas las mejores monedas o no hay candidatas")
             return
         ok = ejecutar_compra_autonoma(symbol)
         if ok:
