@@ -23,7 +23,8 @@ client.API_URL = 'https://testnet.binance.vision/api'
 AUTO = False
 MONTO_PCT = 0.20
 STOPLOSS_PCT = 0.02
-TAKE_PROFIT_PCT = 0.05
+TAKE_PROFIT_PCT = 0.012  # V3.8: 1.2%
+AUTO_SELL_PCT = 0.008   # V3.8: 0.8% para venta auto si lleva 2h
 MONTO_MINIMO = 5.5
 last_trade = 0
 positions = {}
@@ -50,14 +51,16 @@ def cargar_todo():
                 positions = data.get("positions", {})
                 AUTO = data.get("AUTO", False)
                 last_trade = data.get("last_trade", 0)
+                # Compatibilidad con V3.7 que no tenia tiempo
+                for sym in positions:
+                    if 'time' not in positions[sym]:
+                        positions[sym]['time'] = time.time()
         if os.path.exists(HISTORIAL_FILE):
             with open(HISTORIAL_FILE, "r") as f:
                 historial_trades = json.load(f)
-        print(f"Cargado: {len(positions)} posiciones, {len(historial_trades)} trades en historial")
+        print(f"Cargado: {len(positions)} posiciones, {len(historial_trades)} trades")
     except Exception as e:
         print(f"Error cargando: {e}")
-        positions = {}
-        historial_trades = []
 
 def configurar_menu():
     try:
@@ -97,17 +100,14 @@ def limpiar_fantasmas():
             del positions[f]
         if fantasmas:
             guardar_todo()
-            return True
     except Exception as e:
         print(f"Error limpiando fantasmas: {e}")
-    return False
 
 def buscar_mejor_moneda():
     try:
-        print("🔍 Buscando monedas en Binance Testnet...")
+        print("🔍 Buscando monedas...")
         limpiar_fantasmas()
         tickers = client.get_ticker()
-        print(f"Tickers recibidos: {len(tickers)}")
         blacklist = ['USDCUSDT','BUSDUSDT','DAIUSDT','TUSDUSDT','FDUSDUSDT','USDEUSDT']
         candidatos = []
         for t in tickers:
@@ -121,19 +121,14 @@ def buscar_mejor_moneda():
                 if vol > 1000000 and change > -5 and change < 20:
                     candidatos.append(t)
             except: continue
-        
-        print(f"Candidatos filtrados: {len(candidatos)}")
         candidatos = sorted(candidatos, key=lambda x: float(x['priceChangePercent']), reverse=True)
         if candidatos:
             top = candidatos[0]
-            print(f"✅ Mejor candidata: {top['symbol']} {top['priceChangePercent']}% vol {top['quoteVolume']}")
+            print(f"✅ Candidata: {top['symbol']} {top['priceChangePercent']}%")
             return top['symbol'], float(top['priceChangePercent'])
-        print("⚠️ No hay candidatas despues del filtro")
         return None, 0
     except Exception as e:
-        print(f"❌ Error buscando moneda: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error buscando: {e}")
         return None, 0
 
 def ajustar_cantidad(symbol, cantidad_bruta):
@@ -144,8 +139,7 @@ def ajustar_cantidad(symbol, cantidad_bruta):
         precision = int(round(-math.log(step_size, 10), 0)) if step_size < 1 else 0
         if precision < 0: precision = 0
         cantidad = math.floor(cantidad_bruta * (10**precision)) / (10**precision)
-        if cantidad == 0:
-            cantidad = step_size
+        if cantidad == 0: cantidad = step_size
         return cantidad
     except:
         return cantidad_bruta
@@ -154,128 +148,115 @@ def ejecutar_compra_autonoma(symbol):
     try:
         balance = client.get_account()
         usdt_balance = float([b for b in balance['balances'] if b['asset']=='USDT'][0]['free'])
-        
         if usdt_balance < MONTO_MINIMO:
-            print(f"Saldo insuficiente total: {usdt_balance} < {MONTO_MINIMO}, pausando")
+            print(f"Saldo insuficiente: {usdt_balance}")
             return False
-
         monto_20pct = usdt_balance * MONTO_PCT
-        monto_usdt = 0
-        modo = ""
-
         if monto_20pct >= 11:
             monto_usdt = monto_20pct
-            modo = f"20% ({MONTO_PCT*100:.0f}%)"
+            modo = f"20%"
         else:
-            if usdt_balance < 12:
-                monto_usdt = usdt_balance * 0.9
-            else:
-                monto_usdt = max(MONTO_MINIMO, monto_20pct)
-            modo = "MINIMO (saldo bajo)"
-
+            monto_usdt = usdt_balance * 0.9 if usdt_balance < 12 else max(MONTO_MINIMO, monto_20pct)
+            modo = "MINIMO"
         ticker = client.get_symbol_ticker(symbol=symbol)
         precio = float(ticker['price'])
         cantidad_bruta = monto_usdt / precio
         cantidad = ajustar_cantidad(symbol, cantidad_bruta)
         client.order_market_buy(symbol=symbol, quantity=cantidad)
-
         if symbol in positions:
             old = positions[symbol]
             total_qty = old['qty'] + cantidad
             avg_price = (old['price']*old['qty'] + precio*cantidad) / total_qty
-            positions[symbol] = {'price': avg_price, 'qty': total_qty}
+            positions[symbol] = {'price': avg_price, 'qty': total_qty, 'time': old.get('time', time.time())}
         else:
-            positions[symbol] = {'price': precio, 'qty': cantidad}
-        
+            positions[symbol] = {'price': precio, 'qty': cantidad, 'time': time.time()}
         guardar_todo()
-        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}\n💵 Monto: {monto_usdt:.2f} USDT - Modo: {modo}\nSaldo restante: {usdt_balance - monto_usdt:.2f} USDT")
+        bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}\n💵 Monto: {monto_usdt:.2f} USDT - Modo: {modo}\nSaldo: {usdt_balance - monto_usdt:.2f} USDT")
         return True
     except Exception as e:
-        print(f"Error AUTO comprando {symbol}: {e}")
         bot.send_message(MY_CHAT_ID, f"❌ Error AUTO comprando {symbol}: {e}")
         return False
 
 def check_ganancias():
     while True:
         try:
-            print(f"[check_ganancias] vivo - posiciones: {len(positions)}")
             for symbol in list(positions.keys()):
                 info = positions[symbol]
                 curr_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                 ganancia_pct = (curr_price - info['price']) / info['price']
+                tiempo_holding = time.time() - info.get('time', time.time())
+                horas = tiempo_holding / 3600
+
+                # 1. STOPLOSS -2%
                 if ganancia_pct <= -STOPLOSS_PCT:
                     try:
                         qty_ajustada = ajustar_cantidad(symbol, info['qty'])
                         client.order_market_sell(symbol=symbol, quantity=qty_ajustada)
                         bot.send_message(MY_CHAT_ID, f"🛑 STOPLOSS -2% en {symbol}\nVendido en {curr_price}")
-                        historial_trades.append({
-                            "par": symbol,
-                            "tipo": "SL",
-                            "ganancia_pct": round(ganancia_pct*100,2),
-                            "ganancia_usdt": round((curr_price - info['price'])*info['qty'],4),
-                            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
-                        })
+                        historial_trades.append({"par": symbol, "tipo": "SL", "ganancia_pct": round(ganancia_pct*100,2), "ganancia_usdt": round((curr_price - info['price'])*info['qty'],4), "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
                         del positions[symbol]
                         guardar_todo()
                     except Exception as e:
                         print(f"Error SL {symbol}: {e}")
+
+                # 2. V3.8 AUTO-SELL 0.8% despues de 2 horas
+                elif ganancia_pct >= AUTO_SELL_PCT and horas >= 2:
+                    try:
+                        qty_ajustada = ajustar_cantidad(symbol, info['qty'])
+                        client.order_market_sell(symbol=symbol, quantity=qty_ajustada)
+                        gan_usdt = (curr_price - info['price'])*info['qty']
+                        bot.send_message(MY_CHAT_ID, f"⚡ AUTO-VENTA SCALPER en {symbol}\n+{ganancia_pct*100:.2f}% (+{gan_usdt:.4f} USDT) despues de {horas:.1f}h\nAsegurando profit!")
+                        historial_trades.append({"par": symbol, "tipo": "SCALP_0.8", "ganancia_pct": round(ganancia_pct*100,2), "ganancia_usdt": round(gan_usdt,4), "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                        del positions[symbol]
+                        guardar_todo()
+                    except Exception as e:
+                        print(f"Error auto-sell {symbol}: {e}")
+
+                # 3. AVISO 1.2% para que tu decidas
                 elif ganancia_pct >= TAKE_PROFIT_PCT:
-                    bot.send_message(MY_CHAT_ID, f"💰 ¡+{ganancia_pct*100:.2f}% en {symbol}!\nEntrada: {info['price']} -> Ahora: {curr_price}\n/retirar - Vendo\n/dejar - Dejo correr")
+                    bot.send_message(MY_CHAT_ID, f"💰 ¡+{ganancia_pct*100:.2f}% en {symbol}!\nEntrada: {info['price']} -> Ahora: {curr_price}\nLleva {horas:.1f}h\n/retirar - Vendo\n/dejar - Dejo correr")
+
         except Exception as e:
             print(f"Check error: {e}")
         time.sleep(60)
 
 def comprar_autonomo():
     try:
-        print("--- comprar_autonomo iniciado ---")
         symbol, change = buscar_mejor_moneda()
         if symbol:
-            print(f"Intentando comprar {symbol}")
-            ok = ejecutar_compra_autonoma(symbol)
-            if not ok:
-                print(f"Fallo compra de {symbol}")
-            return ok
+            return ejecutar_compra_autonoma(symbol)
         else:
-            print("No hay candidatas ahora, intento en proximo ciclo")
+            print("No hay candidatas")
             return False
     except Exception as e:
-        print(f"Error en comprar_autonomo: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error comprar_autonomo: {e}")
         return False
 
 def auto_loop():
     global last_trade
-    print("🚀 auto_loop iniciado")
+    print("🚀 auto_loop V3.8 iniciado")
     while True:
         try:
             if AUTO:
                 tiempo_pasado = time.time() - last_trade
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] AUTO={AUTO} | Ultimo trade hace {tiempo_pasado/60:.1f} min | Posiciones: {len(positions)}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] AUTO={AUTO} | Hace {tiempo_pasado/60:.1f} min | Pos: {len(positions)}")
                 if tiempo_pasado >= 900:
-                    print("⏰ Toca comprar (15min cumplidos)")
                     result = comprar_autonomo()
                     if result:
                         last_trade = time.time()
-                        print("last_trade actualizado")
                     else:
-                        print("No se compro, reintentando en 3 min")
                         last_trade = time.time() - 720
                     guardar_todo()
-            else:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] AUTO apagado, esperando...")
         except Exception as e:
-            print(f"❌ Error CRITICO en auto_loop: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Error auto_loop: {e}")
         time.sleep(30)
 
 @app.route('/')
 def home(): 
-    return f"Shinito V3.7 - FIX LOOP INMORTAL - AUTO:{AUTO} Pos:{len(positions)} Last:{int(time.time()-last_trade)}s ago - {datetime.now()}"
+    return f"Shinito V3.8 SCALPER 0.8%/1.2% - AUTO:{AUTO} Pos:{len(positions)} - {datetime.now()}"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito V3.7 FIX LOOP!\n/auto_on - Activa 15min\n/auto_off - Pausa auto\n/estado - Ver saldo\n/forzar - Fuerza 1 compra\n/retirar - Vende todo\n/dejar - Deja correr\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
+def start(m): bot.reply_to(m, "🔥 Shinito V3.8 SCALPER!\n/auto_on - Activa\n/auto_off - Pausa\n/estado - Saldo\n/forzar - Compra\n/retirar - Vende todo\n/historial - Trades\nTP: 1.2% aviso | Auto-sell: 0.8% + 2h")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
@@ -283,7 +264,7 @@ def auto_on(m):
     AUTO=True
     last_trade = time.time() - 900
     guardar_todo()
-    bot.reply_to(m, "✅ AUTO ACTIVADO V3.7\nBusca moneda ahora mismo y luego cada 15min\nSi hay saldo: 20% | Si no: Minimo 5.5 USDT\nMira los logs de Render, ahora si veras todo")
+    bot.reply_to(m, "✅ AUTO V3.8 SCALPER ACTIVADO\nAviso en +1.2%\nAuto-venta en +0.8% despues de 2h\nSL -2%")
 
 @bot.message_handler(commands=['auto_off'])
 def auto_off(m):
@@ -294,22 +275,21 @@ def auto_off(m):
 @bot.message_handler(commands=['forzar'])
 def forzar(m):
     try:
-        bot.reply_to(m, "🔎 Forzando búsqueda... revisa logs de Render")
+        bot.reply_to(m, "🔎 Forzando...")
         symbol, change = buscar_mejor_moneda()
         if not symbol:
-            bot.reply_to(m, "No hay candidatas ahora (filtro muy estricto o proxy fallando), espera 15 min o revisa logs")
+            bot.reply_to(m, "No hay candidatas")
             return
         ok = ejecutar_compra_autonoma(symbol)
-        if ok:
-            bot.reply_to(m, f"✅ Compra forzada: {symbol} (+{change:.2f}%)")
+        if ok: bot.reply_to(m, f"✅ Compra: {symbol} (+{change:.2f}%)")
     except Exception as e:
-        bot.reply_to(m, f"Error en forzar: {e}")
+        bot.reply_to(m, f"Error: {e}")
         
 @bot.message_handler(commands=['retirar'])
 def retirar(m):
     try:
         if not positions:
-            bot.reply_to(m, "No hay posiciones abiertas")
+            bot.reply_to(m, "No hay posiciones")
             return
         for symbol in list(positions.keys()):
             info = positions[symbol]
@@ -318,13 +298,7 @@ def retirar(m):
             curr = float(client.get_symbol_ticker(symbol=symbol)['price'])
             gan = (curr - info['price'])/info['price']*100
             gan_usdt = (curr - info['price'])*info['qty']
-            historial_trades.append({
-                "par": symbol,
-                "tipo": "MANUAL",
-                "ganancia_pct": round(gan,2),
-                "ganancia_usdt": round(gan_usdt,4),
-                "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
-            })
+            historial_trades.append({"par": symbol, "tipo": "MANUAL", "ganancia_pct": round(gan,2), "ganancia_usdt": round(gan_usdt,4), "fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
             bot.reply_to(m, f"✅ Vendido {symbol} con {gan:.2f}% (+{gan_usdt:.4f} USDT)")
             del positions[symbol]
         guardar_todo()
@@ -332,8 +306,7 @@ def retirar(m):
         bot.reply_to(m, f"Error retirar: {e}")
 
 @bot.message_handler(commands=['dejar'])
-def dejar(m):
-    bot.reply_to(m, "👌 Dejando correr la ganancia")
+def dejar(m): bot.reply_to(m, "👌 Dejando correr la ganancia")
 
 @bot.message_handler(commands=['estado'])
 def estado(m):
@@ -344,7 +317,8 @@ def estado(m):
             for s,i in positions.items():
                 curr = float(client.get_symbol_ticker(symbol=s)['price'])
                 pct = (curr-i['price'])/i['price']*100
-                msg += f"{s}: {pct:.2f}% ({i['qty']})\n"
+                horas = (time.time() - i.get('time', time.time()))/3600
+                msg += f"{s}: {pct:.2f}% ({horas:.1f}h)\n"
         else:
             msg += "Sin posiciones"
         bot.reply_to(m, msg)
@@ -355,7 +329,7 @@ def estado(m):
 def historial(m):
     try:
         if not historial_trades:
-            bot.reply_to(m, "📊 Sin trades aún. Usa /forzar para el primero.")
+            bot.reply_to(m, "📊 Sin trades aún.")
             return
         total_usdt = sum([t.get('ganancia_usdt',0) for t in historial_trades])
         msg = f"📊 HISTORIAL ({len(historial_trades)} trades)\nGanancia total: {total_usdt:.4f} USDT\n\n"
@@ -384,7 +358,7 @@ def recuperar(m):
     try:
         account = client.get_account()
         balances = [b for b in account['balances'] if float(b['free']) > 0 and b['asset'] != 'USDT']
-        msg = "🔄 Sincronizando con Binance...\n"
+        msg = "🔄 Sincronizando...\n"
         for bal in balances:
             asset = bal['asset']
             symbol = asset + "USDT"
@@ -393,11 +367,11 @@ def recuperar(m):
                 if free == 0: continue
                 if symbol not in positions:
                     curr = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                    positions[symbol] = {'price': curr, 'qty': free}
+                    positions[symbol] = {'price': curr, 'qty': free, 'time': time.time()}
                     msg += f"Recuperado: {symbol} x{free}\n"
             except: continue
         guardar_todo()
-        bot.reply_to(m, msg + "\n✅ Recuperación completa. Usa /estado")
+        bot.reply_to(m, msg + "\n✅ Recuperación completa.")
     except Exception as e:
         bot.reply_to(m, f"Error recuperar: {e}")
 
@@ -409,7 +383,7 @@ def run_bot():
             time.sleep(3)
             bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
         except Exception as e:
-            print(f"Polling crash: {e} - reintentando en 10s")
+            print(f"Polling crash: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
