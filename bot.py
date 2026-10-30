@@ -24,7 +24,7 @@ AUTO = False
 MONTO_PCT = 0.20
 STOPLOSS_PCT = 0.02
 TAKE_PROFIT_PCT = 0.05
-MONTO_MINIMO = 5.5  # Minimo que deja Binance real
+MONTO_MINIMO = 5.5
 last_trade = 0
 positions = {}
 historial_trades = []
@@ -104,8 +104,10 @@ def limpiar_fantasmas():
 
 def buscar_mejor_moneda():
     try:
+        print("🔍 Buscando monedas en Binance Testnet...")
         limpiar_fantasmas()
         tickers = client.get_ticker()
+        print(f"Tickers recibidos: {len(tickers)}")
         blacklist = ['USDCUSDT','BUSDUSDT','DAIUSDT','TUSDUSDT','FDUSDUSDT','USDEUSDT']
         candidatos = []
         for t in tickers:
@@ -116,15 +118,22 @@ def buscar_mejor_moneda():
             try:
                 vol = float(t['quoteVolume'])
                 change = float(t['priceChangePercent'])
-                if vol > 5000000 and change > 0 and change < 15:
+                if vol > 1000000 and change > -5 and change < 20:
                     candidatos.append(t)
             except: continue
+        
+        print(f"Candidatos filtrados: {len(candidatos)}")
         candidatos = sorted(candidatos, key=lambda x: float(x['priceChangePercent']), reverse=True)
         if candidatos:
-            return candidatos[0]['symbol'], float(candidatos[0]['priceChangePercent'])
+            top = candidatos[0]
+            print(f"✅ Mejor candidata: {top['symbol']} {top['priceChangePercent']}% vol {top['quoteVolume']}")
+            return top['symbol'], float(top['priceChangePercent'])
+        print("⚠️ No hay candidatas despues del filtro")
         return None, 0
     except Exception as e:
-        print(f"Error buscando moneda: {e}")
+        print(f"❌ Error buscando moneda: {e}")
+        import traceback
+        traceback.print_exc()
         return None, 0
 
 def ajustar_cantidad(symbol, cantidad_bruta):
@@ -141,27 +150,23 @@ def ajustar_cantidad(symbol, cantidad_bruta):
     except:
         return cantidad_bruta
 
-# --- LOGICA NUEVA V3.3: 20% si alcanza, si no minimo ---
 def ejecutar_compra_autonoma(symbol):
     try:
         balance = client.get_account()
         usdt_balance = float([b for b in balance['balances'] if b['asset']=='USDT'][0]['free'])
         
-        # 1. Si no tiene ni para el minimo, no hace nada y NO spamea
         if usdt_balance < MONTO_MINIMO:
             print(f"Saldo insuficiente total: {usdt_balance} < {MONTO_MINIMO}, pausando")
             return False
 
-        # 2. Calcula 20%
         monto_20pct = usdt_balance * MONTO_PCT
         monto_usdt = 0
         modo = ""
 
-        if monto_20pct >= 11: # Si el 20% ya es suficiente
+        if monto_20pct >= 11:
             monto_usdt = monto_20pct
             modo = f"20% ({MONTO_PCT*100:.0f}%)"
-        else: # Si el 20% no alcanza, usa el minimo posible
-            # Usa 90% del balance si esta muy bajo, para dejar algo para fees
+        else:
             if usdt_balance < 12:
                 monto_usdt = usdt_balance * 0.9
             else:
@@ -186,12 +191,14 @@ def ejecutar_compra_autonoma(symbol):
         bot.send_message(MY_CHAT_ID, f"🤖 AUTO COMPRÉ: {symbol} x{cantidad} @ {precio}\n💵 Monto: {monto_usdt:.2f} USDT - Modo: {modo}\nSaldo restante: {usdt_balance - monto_usdt:.2f} USDT")
         return True
     except Exception as e:
+        print(f"Error AUTO comprando {symbol}: {e}")
         bot.send_message(MY_CHAT_ID, f"❌ Error AUTO comprando {symbol}: {e}")
         return False
 
 def check_ganancias():
     while True:
         try:
+            print(f"[check_ganancias] vivo - posiciones: {len(positions)}")
             for symbol in list(positions.keys()):
                 info = positions[symbol]
                 curr_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -220,42 +227,63 @@ def check_ganancias():
 
 def comprar_autonomo():
     try:
+        print("--- comprar_autonomo iniciado ---")
         symbol, change = buscar_mejor_moneda()
         if symbol:
-            ejecutar_compra_autonoma(symbol)
+            print(f"Intentando comprar {symbol}")
+            ok = ejecutar_compra_autonoma(symbol)
+            if not ok:
+                print(f"Fallo compra de {symbol}")
+            return ok
         else:
-            if len(positions) == 0:
-                print("No hay candidatas ahora, intento en proximo ciclo")
-            else:
-                bot.send_message(MY_CHAT_ID, "ℹ️ No hay monedas nuevas para comprar, todas ya están en posiciones")
+            print("No hay candidatas ahora, intento en proximo ciclo")
+            return False
     except Exception as e:
         print(f"Error en comprar_autonomo: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def auto_loop():
     global last_trade
+    print("🚀 auto_loop iniciado")
     while True:
         try:
-            if AUTO and (time.time() - last_trade) >= 900:
-                comprar_autonomo()
-                last_trade = time.time()
-                guardar_todo()
+            if AUTO:
+                tiempo_pasado = time.time() - last_trade
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] AUTO={AUTO} | Ultimo trade hace {tiempo_pasado/60:.1f} min | Posiciones: {len(positions)}")
+                if tiempo_pasado >= 900:
+                    print("⏰ Toca comprar (15min cumplidos)")
+                    result = comprar_autonomo()
+                    if result:
+                        last_trade = time.time()
+                        print("last_trade actualizado")
+                    else:
+                        print("No se compro, reintentando en 3 min")
+                        last_trade = time.time() - 720
+                    guardar_todo()
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] AUTO apagado, esperando...")
         except Exception as e:
-            print(f"Error en auto_loop: {e}")
-        time.sleep(10)
+            print(f"❌ Error CRITICO en auto_loop: {e}")
+            import traceback
+            traceback.print_exc()
+        time.sleep(30)
 
 @app.route('/')
-def home(): return "Shinito V3.3 - 20% o Minimo - AntiSpam"
+def home(): 
+    return f"Shinito V3.7 - FIX LOOP INMORTAL - AUTO:{AUTO} Pos:{len(positions)} Last:{int(time.time()-last_trade)}s ago - {datetime.now()}"
 
 @bot.message_handler(commands=['start'])
-def start(m): bot.reply_to(m, "🔥 Shinito V3.3 FIX!\n/auto_on - Activa 15min\n/auto_off - Pausa auto\n/estado - Ver saldo\n/forzar - Fuerza 1 compra\n/retirar - Vende todo\n/dejar - Deja correr\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
+def start(m): bot.reply_to(m, "🔥 Shinito V3.7 FIX LOOP!\n/auto_on - Activa 15min\n/auto_off - Pausa auto\n/estado - Ver saldo\n/forzar - Fuerza 1 compra\n/retirar - Vende todo\n/dejar - Deja correr\n/historial - Ver operaciones\n/ganancias - Resumen profit\n/recuperar - Sincroniza Binance")
 
 @bot.message_handler(commands=['auto_on'])
 def auto_on(m):
     global AUTO, last_trade
     AUTO=True
-    last_trade = time.time()
+    last_trade = time.time() - 900
     guardar_todo()
-    bot.reply_to(m, "✅ AUTO ACTIVADO\nBusca moneda cada 15min\nSi hay saldo: 20% | Si no: Minimo 5.5 USDT")
+    bot.reply_to(m, "✅ AUTO ACTIVADO V3.7\nBusca moneda ahora mismo y luego cada 15min\nSi hay saldo: 20% | Si no: Minimo 5.5 USDT\nMira los logs de Render, ahora si veras todo")
 
 @bot.message_handler(commands=['auto_off'])
 def auto_off(m):
@@ -266,10 +294,10 @@ def auto_off(m):
 @bot.message_handler(commands=['forzar'])
 def forzar(m):
     try:
-        bot.reply_to(m, "🔎 Forzando búsqueda...")
+        bot.reply_to(m, "🔎 Forzando búsqueda... revisa logs de Render")
         symbol, change = buscar_mejor_moneda()
         if not symbol:
-            bot.reply_to(m, "Ya tienes todas las mejores monedas o no hay candidatas con volumen, espera 15 min")
+            bot.reply_to(m, "No hay candidatas ahora (filtro muy estricto o proxy fallando), espera 15 min o revisa logs")
             return
         ok = ejecutar_compra_autonoma(symbol)
         if ok:
